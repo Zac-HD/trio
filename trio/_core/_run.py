@@ -51,9 +51,9 @@ GLOBAL_RUN_CONTEXT = threading.local()
 if os.name == "nt":
     from ._io_windows import WindowsIOManager as TheIOManager
 elif hasattr(select, "epoll"):
-    from ._io_epoll import EpollIOManager as TheIOManager
+    from ._io_epoll import EpollIOManager as TheIOManager  # type: ignore
 elif hasattr(select, "kqueue"):
-    from ._io_kqueue import KqueueIOManager as TheIOManager
+    from ._io_kqueue import KqueueIOManager as TheIOManager  # type: ignore
 else:  # pragma: no cover
     raise NotImplementedError("unsupported platform")
 

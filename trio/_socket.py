@@ -310,7 +310,7 @@ def fromfd(*args, **kwargs):
 
 if hasattr(_stdlib_socket, "fromshare"):
 
-    @_wraps(_stdlib_socket.fromshare, assigned=(), updated=())
+    @_wraps(_stdlib_socket.fromshare, assigned=(), updated=())  # type: ignore
     @_add_to_all
     def fromshare(*args, **kwargs):
         return from_stdlib_socket(_stdlib_socket.fromshare(*args, **kwargs))

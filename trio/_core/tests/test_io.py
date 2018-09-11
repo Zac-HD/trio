@@ -52,11 +52,11 @@ notify_close_options = [_core.notify_socket_close]
 # We aren't testing the _fd_ versions, because they're the same as the socket
 # ones. But if they ever stop being the same we should notice and add tests!
 if hasattr(_core, "wait_readable"):
-    assert _core.wait_socket_readable is _core.wait_readable
+    assert _core.wait_socket_readable is _core.wait_readable  # type: ignore
 if hasattr(_core, "wait_writable"):
-    assert _core.wait_socket_writable is _core.wait_writable
+    assert _core.wait_socket_writable is _core.wait_writable  # type: ignore
 if hasattr(_core, "notify_fd_close"):
-    assert _core.notify_socket_close is _core.notify_fd_close
+    assert _core.notify_socket_close is _core.notify_fd_close  # type: ignore
 
 for options_list in [
     wait_readable_options, wait_writable_options, notify_close_options

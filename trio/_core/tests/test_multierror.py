@@ -1,7 +1,7 @@
 import logging
 import pytest
 
-from traceback import extract_tb, print_exception, format_exception, _cause_message
+from traceback import extract_tb, print_exception, format_exception, _cause_message  # type: ignore
 import sys
 import os
 import re
