@@ -3005,3 +3005,27 @@ def test_trio_context_detection() -> None:
             await _core.wait_task_rescheduled(inner_abort)
 
     _core.run(main)
+
+
+async def test_closed_task_iter_await_frames() -> None:
+    """Test that Task.__iter__ handles cr_frame/gi_frame becoming None.
+
+    When a coroutine completes, its cr_frame/gi_frame attributes become None.
+    The iterator should handle this gracefully rather than trying to access
+    attributes on None.
+    """
+    completed_task = None
+
+    async with _core.open_nursery() as nursery:
+
+        async def capture_task() -> None:
+            nonlocal completed_task
+            completed_task = _core.current_task()
+            await _core.checkpoint()
+
+        nursery.start_soon(capture_task)
+
+    # Task has completed, so coro.cr_frame should be None, thus no frames
+    assert completed_task is not None
+    assert completed_task.coro.cr_frame is None
+    assert list(completed_task.iter_await_frames()) == []

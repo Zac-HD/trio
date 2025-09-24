@@ -1,0 +1,2 @@
+Fixed a rare TOC/TOU bug in `trio.lowlevel.Task.iter_await_frames` where
+the underlying coroutine has already been closed.
