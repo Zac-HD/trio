@@ -44,6 +44,13 @@ timeouts:
   near full CPU utilization with no changes. (Thanks to `fluxcapacitor
   <https://github.com/majek/fluxcapacitor>`__ for this awesome idea.)
 
+* The autojump feature knows about work that's in flight outside the
+  run loop: by default it won't jump ahead of a running
+  `trio.to_thread.run_sync` worker thread (see
+  :attr:`~MockClock.autojump_wait_for_threads`), and libraries that
+  hand work off to worker processes and the like can get the same
+  treatment via :func:`trio.lowlevel.autojump_hold`.
+
 * And of course these can be mixed and matched at will.
 
 Regardless of these shenanigans, from "inside" Trio the passage of time

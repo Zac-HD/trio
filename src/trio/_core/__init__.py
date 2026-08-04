@@ -31,12 +31,14 @@ from ._parking_lot import (
 # Imports that always exist
 from ._run import (
     TASK_STATUS_IGNORED,
+    AutojumpHold,
     CancelScope,
     Nursery,
     RunStatistics,
     Task,
     TaskStatus,
     add_instrument,
+    autojump_hold,
     checkpoint,
     checkpoint_if_cancelled,
     current_clock,

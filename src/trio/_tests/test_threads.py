@@ -38,7 +38,7 @@ from .._threads import (
     to_thread_run_sync,
     wait_all_threads_completed,
 )
-from ..testing import wait_all_tasks_blocked
+from ..testing import MockClock, wait_all_tasks_blocked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -1194,3 +1194,93 @@ async def test_wait_all_threads_completed() -> None:
 async def test_wait_all_threads_completed_no_threads() -> None:
     await wait_all_threads_completed()
     assert active_thread_count() == 0
+
+
+async def test_autojump_clock_waits_for_thread(mock_clock: MockClock) -> None:
+    # Regression test for https://github.com/python-trio/trio/issues/456: the
+    # autojump clock should not jump ahead of a running worker thread, firing
+    # timeouts spuriously while the thread does real work in real time.
+    mock_clock.autojump_threshold = 0
+
+    virtual_start = _core.current_time()
+    with fail_after(1):
+        await to_thread_run_sync(time.sleep, 0.25)
+    # the clock never jumped: the thread's real work was the only thing
+    # keeping the run loop busy, and the hold kept the clock parked
+    assert _core.current_time() == virtual_start
+
+    # with the thread done, autojump operates normally again
+    await sleep(100)
+    assert _core.current_time() == virtual_start + 100
+
+
+async def test_autojump_clock_from_thread_reentrancy(mock_clock: MockClock) -> None:
+    # A thread blocked in from_thread.run is waiting on the *run loop*, not
+    # the other way around, so virtual time must still be able to advance --
+    # otherwise this test would deadlock.
+    mock_clock.autojump_threshold = 0
+
+    async def sleep_and_check() -> str:
+        # while the delivered afn runs, the thread's hold is released
+        assert _core.current_statistics().autojump_holds == ()
+        await sleep(10)
+        return "slept"
+
+    def thread_fn() -> str:
+        result: str = from_thread_run(sleep_and_check)
+        assert from_thread_run_sync(_core.current_time) >= 10
+        return result
+
+    virtual_start = _core.current_time()
+    assert await to_thread_run_sync(thread_fn) == "slept"
+    assert _core.current_time() >= virtual_start + 10
+
+
+async def test_to_thread_takes_autojump_hold() -> None:
+    # to_thread.run_sync registers an autojump hold for the duration of the
+    # thread, visible in current_statistics()
+    assert _core.current_statistics().autojump_holds == ()
+    ev = threading.Event()
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(partial(to_thread_run_sync, ev.wait))
+        await wait_all_tasks_blocked()
+        holds = _core.current_statistics().autojump_holds
+        assert len(holds) == 1
+        assert holds[0].startswith("trio.to_thread.run_sync-")
+        ev.set()
+
+    assert _core.current_statistics().autojump_holds == ()
+
+
+async def test_abandoned_thread_releases_autojump_hold() -> None:
+    # An abandoned thread can't reschedule anybody, so it must not keep
+    # holding the clock after cancellation.
+    ev = threading.Event()
+
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(
+            partial(to_thread_run_sync, ev.wait, abandon_on_cancel=True),
+        )
+        await wait_all_tasks_blocked()
+        assert len(_core.current_statistics().autojump_holds) == 1
+        nursery.cancel_scope.cancel()
+
+    assert _core.current_statistics().autojump_holds == ()
+    ev.set()
+
+
+async def test_autojump_clock_wait_for_threads_disabled(
+    mock_clock: MockClock,
+) -> None:
+    # With autojump_wait_for_threads=False, the pre-#456 behavior is
+    # restored: the clock jumps while a thread is still blocked, so a
+    # virtual-time timeout can cancel and abandon it.
+    mock_clock.autojump_threshold = 0
+    mock_clock.autojump_wait_for_threads = False
+
+    ev = threading.Event()
+    with move_on_after(5) as scope:
+        await to_thread_run_sync(ev.wait, abandon_on_cancel=True)
+    assert scope.cancelled_caught
+    ev.set()

@@ -18,6 +18,7 @@ import trio
 from ._core import (
     RunVar,
     TrioToken,
+    autojump_hold,
     checkpoint,
     disable_ki_protection,
     enable_ki_protection,
@@ -167,7 +168,10 @@ class Run(Generic[RetT]):  # type: ignore[explicit-any]
         coro = coroutine_or_error(self.afn, *self.args)
         return await coro
 
-    async def run(self) -> None:
+    async def run(self) -> outcome.Outcome[RetT]:
+        # The result is returned rather than delivered to self.queue, so that
+        # our caller (the host task's message loop in to_thread_run_sync) can
+        # re-acquire its autojump hold before the worker thread is unblocked.
         # we use extra checkpoints to pick up and reset any context changes
         task = trio.lowlevel.current_task()
         old_context = task.context
@@ -176,7 +180,7 @@ class Run(Generic[RetT]):  # type: ignore[explicit-any]
         result = await outcome.acapture(self.unprotected_afn)
         task.context = old_context
         await trio.lowlevel.cancel_shielded_checkpoint()
-        self.queue.put_nowait(result)
+        return result
 
     async def run_system(self) -> None:
         result = await outcome.acapture(self.unprotected_afn)
@@ -422,40 +426,59 @@ async def to_thread_run_sync(
 
     await limiter.acquire_on_behalf_of(placeholder)
     with _track_active_thread():
+        # While the worker thread runs, it -- not the run loop -- is what's
+        # making progress, so keep an autojump MockClock from jumping ahead
+        # of it and firing timeouts spuriously.
+        hold = autojump_hold(name=name)
         try:
-            start_thread_soon(worker_fn, deliver_worker_fn_result, thread_name)
-        except:
-            limiter.release_on_behalf_of(placeholder)
-            raise
+            try:
+                start_thread_soon(worker_fn, deliver_worker_fn_result, thread_name)
+            except:
+                limiter.release_on_behalf_of(placeholder)
+                raise
 
-        def abort(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
-            # fill so from_thread_check_cancelled can raise
-            # 'raise_cancel' will immediately delete its reason object, so we make
-            # a copy in each thread
-            cancel_register[0] = raise_cancel
-            if abandon_bool:
-                # empty so report_back_in_trio_thread_fn cannot reschedule
-                task_register[0] = None
-                return trio.lowlevel.Abort.SUCCEEDED
-            else:
-                return trio.lowlevel.Abort.FAILED
+            def abort(raise_cancel: RaiseCancelT) -> trio.lowlevel.Abort:
+                # fill so from_thread_check_cancelled can raise
+                # 'raise_cancel' will immediately delete its reason object, so we make
+                # a copy in each thread
+                cancel_register[0] = raise_cancel
+                if abandon_bool:
+                    # empty so report_back_in_trio_thread_fn cannot reschedule
+                    task_register[0] = None
+                    return trio.lowlevel.Abort.SUCCEEDED
+                else:
+                    return trio.lowlevel.Abort.FAILED
 
-        while True:
-            # wait_task_rescheduled return value cannot be typed
-            msg_from_thread: outcome.Outcome[RetT] | Run[object] | RunSync[object] = (
-                await trio.lowlevel.wait_task_rescheduled(abort)
-            )
-            if isinstance(msg_from_thread, outcome.Outcome):
-                return msg_from_thread.unwrap()
-            elif isinstance(msg_from_thread, Run):
-                await msg_from_thread.run()
-            elif isinstance(msg_from_thread, RunSync):
-                msg_from_thread.run_sync()
-            else:  # pragma: no cover, internal debugging guard TODO: use assert_never
-                raise TypeError(
-                    f"trio.to_thread.run_sync received unrecognized thread message {msg_from_thread!r}.",
-                )
-            del msg_from_thread
+            while True:
+                # wait_task_rescheduled return value cannot be typed
+                msg_from_thread: (
+                    outcome.Outcome[RetT] | Run[object] | RunSync[object]
+                ) = await trio.lowlevel.wait_task_rescheduled(abort)
+                if isinstance(msg_from_thread, outcome.Outcome):
+                    return msg_from_thread.unwrap()
+                elif isinstance(msg_from_thread, Run):
+                    # The thread is blocked waiting for the result of
+                    # msg_from_thread.afn, so progress now depends on the run
+                    # loop again: release the hold while the async function
+                    # runs (it may need virtual time to advance), and
+                    # re-acquire it before delivering the result, so there's
+                    # no moment where the thread runs sync code unheld.
+                    hold.release()
+                    run_result = await msg_from_thread.run()
+                    hold = autojump_hold(name=name)
+                    msg_from_thread.queue.put_nowait(run_result)
+                elif isinstance(msg_from_thread, RunSync):
+                    msg_from_thread.run_sync()
+                else:  # pragma: no cover, internal debugging guard TODO: use assert_never
+                    raise TypeError(
+                        f"trio.to_thread.run_sync received unrecognized thread message {msg_from_thread!r}.",
+                    )
+                del msg_from_thread
+        finally:
+            # `hold.released` can be true here only if something went wrong
+            # between releasing and re-acquiring in the Run branch above.
+            if not hold.released:
+                hold.release()
 
 
 def from_thread_check_cancelled() -> None:

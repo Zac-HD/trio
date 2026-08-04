@@ -54,6 +54,10 @@ def current_statistics() -> RunStatistics:
       backend. This always has an attribute ``backend`` which is a string
       naming which operating-system-specific I/O backend is in use; the
       other attributes vary between backends.
+    * ``autojump_holds`` (tuple of str): The names of all
+      currently-active autojump holds, i.e. work in flight outside the
+      run loop that keeps an autojump `~trio.testing.MockClock` from
+      jumping. See :func:`trio.lowlevel.autojump_hold`.
 
     """
     try:

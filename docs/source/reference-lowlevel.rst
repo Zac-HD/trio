@@ -112,6 +112,27 @@ The current clock
 .. autofunction:: current_clock
 
 
+.. _autojump-holds:
+
+Autojump holds
+--------------
+
+If you're writing a library that hands work off to somewhere Trio's
+run loop can't see – a worker thread, a worker process, a foreign
+event loop – then to a `~trio.testing.MockClock` with an
+:attr:`~trio.testing.MockClock.autojump_threshold`, your in-flight
+work looks like an idle run loop, and the clock may jump ahead of it
+and fire timeouts spuriously. Acquire an autojump hold for the
+duration of the external work to keep the clock parked until it
+finishes. (`trio.to_thread.run_sync` does this automatically for its
+worker threads.)
+
+.. autofunction:: autojump_hold
+
+.. autoclass:: AutojumpHold()
+   :members:
+
+
 .. _instrumentation:
 
 Instrument API

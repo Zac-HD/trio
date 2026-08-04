@@ -1701,6 +1701,10 @@ class RunStatistics:
       backend. This always has an attribute ``backend`` which is a string
       naming which operating-system-specific I/O backend is in use; the
       other attributes vary between backends.
+    * ``autojump_holds`` (tuple of str): The names of all currently-active
+      autojump holds, i.e. work in flight outside the run loop that keeps an
+      autojump `~trio.testing.MockClock` from jumping. See
+      :func:`trio.lowlevel.autojump_hold`.
     """
 
     tasks_living: int
@@ -1708,6 +1712,151 @@ class RunStatistics:
     seconds_to_next_deadline: float
     io_statistics: IOStatistics
     run_sync_soon_queue_size: int
+    autojump_holds: tuple[str, ...] = ()
+
+
+################################################################
+# Autojump holds
+################################################################
+
+
+@final
+class AutojumpHold(metaclass=NoPublicConstructor):
+    """A handle representing an assertion that work is in flight outside the
+    run loop, so an idle run loop should not be treated as a quiescent
+    program.
+
+    While at least one hold is active, a `~trio.testing.MockClock` with an
+    :attr:`~trio.testing.MockClock.autojump_threshold` set will not
+    automatically jump the clock, even if all tasks are blocked. This is used
+    by `trio.to_thread.run_sync` to keep the clock from jumping ahead of a
+    running worker thread, and can be used by any library that hands work off
+    to somewhere the run loop can't see (a worker process, a foreign event
+    loop, a guest-mode host loop, ...) but that will eventually reschedule a
+    task or call :meth:`~trio.lowlevel.TrioToken.run_sync_soon` on its own,
+    without needing Trio's clock to advance.
+
+    Don't construct this class directly; call `trio.lowlevel.autojump_hold`,
+    which acquires a hold and returns the handle for it. Each handle is
+    one-shot: once released it's dead, and re-acquiring means calling
+    `~trio.lowlevel.autojump_hold` again.
+
+    A handle is also a context manager: entering it is a no-op (the hold is
+    already active from the moment `~trio.lowlevel.autojump_hold` returns,
+    like `open`), and exiting releases it if it hasn't been released already.
+
+    Holds don't affect `trio.testing.wait_all_tasks_blocked`, which continues
+    to report on the run loop's own state only.
+    """
+
+    def __init__(self, runner: Runner, name: str) -> None:
+        self._runner = runner
+        self._name = name
+        self._released = False
+
+    def __repr__(self) -> str:
+        state = "released" if self._released else "active"
+        return f"<AutojumpHold {self._name!r}, {state}, at {id(self):#x}>"
+
+    @property
+    def name(self) -> str:
+        """The ``name`` this hold was acquired with."""
+        return self._name
+
+    @property
+    def released(self) -> bool:
+        """True if this hold has been released."""
+        return self._released
+
+    def _release(self) -> None:
+        self._released = True
+        self._runner.autojump_holds.discard(self)
+
+    @enable_ki_protection
+    def release(self) -> None:
+        """Release this hold.
+
+        Raises:
+          RuntimeError: if this hold has already been released.
+
+        """
+        if self._released:
+            raise RuntimeError("this AutojumpHold has already been released")
+        self._release()
+
+    def __enter__(self) -> None:
+        if self._released:
+            raise RuntimeError("can't re-enter an already-released AutojumpHold")
+        return None
+
+    @enable_ki_protection
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        # Unlike release(), this tolerates the hold having already been
+        # released manually, so a hold used as a context manager can also be
+        # released early inside the block.
+        if not self._released:
+            self._release()
+
+
+@enable_ki_protection
+def autojump_hold(name: str = "<unnamed>") -> AutojumpHold:
+    """Prevent an autojump `~trio.testing.MockClock` from jumping the clock
+    while work is in flight outside the run loop.
+
+    Acquiring a hold asserts: "there is work in flight outside the run loop
+    that will eventually reschedule a task (or call
+    :meth:`~trio.lowlevel.TrioToken.run_sync_soon`) on its own, without
+    virtual time needing to advance." While any hold is active, an idle run
+    loop is not treated as quiescent, so a `~trio.testing.MockClock` with an
+    :attr:`~trio.testing.MockClock.autojump_threshold` won't jump. See
+    `AutojumpHold` for details.
+
+    The hold is active from the moment this function returns. The returned
+    handle can be used as a context manager, or released manually::
+
+        with trio.lowlevel.autojump_hold(name="waiting on subprocess"):
+            ...
+
+        # or, when the release point doesn't nest nicely:
+        hold = trio.lowlevel.autojump_hold(name="worker process 3")
+        ...
+        hold.release()
+
+    Must be called from inside a Trio run (including from
+    :meth:`~trio.lowlevel.TrioToken.run_sync_soon` callbacks). If you're
+    delivering results from another thread, hop through
+    :meth:`~trio.lowlevel.TrioToken.run_sync_soon` to release the hold.
+
+    .. warning:: A hold is a promise of future progress. If the external work
+       can't finish without Trio's clock advancing — or never finishes at
+       all — then under an autojump clock, a leaked hold means a hang. Active
+       holds are visible as ``autojump_holds`` in
+       :func:`trio.lowlevel.current_statistics`, which is the place to look
+       when debugging one.
+
+    Args:
+      name (str): an arbitrary label for this hold, shown in
+          :func:`trio.lowlevel.current_statistics` to aid debugging.
+
+    Returns:
+      AutojumpHold: a handle that can be used to release the hold.
+
+    Raises:
+      RuntimeError: if called outside of a Trio run.
+
+    """
+    try:
+        runner = GLOBAL_RUN_CONTEXT.runner
+    except AttributeError:
+        raise RuntimeError("must be called from async context") from None
+    hold = AutojumpHold._create(runner, name)
+    runner.autojump_holds.add(hold)
+    return hold
 
 
 # This holds all the state that gets trampolined back and forth between
@@ -1810,6 +1959,14 @@ class Runner:  # type: ignore[explicit-any]
 
     # If everything goes idle for this long, we call clock._autojump()
     clock_autojump_threshold: float = inf
+    # While this is nonempty (and clock_autojump_wait_for_holds is true),
+    # work is in flight outside the run loop, so we don't treat an idle run
+    # loop as quiescent for autojump purposes. See
+    # trio.lowlevel.autojump_hold.
+    autojump_holds: set[AutojumpHold] = attrs.Factory(set)
+    # Synced from MockClock.autojump_wait_for_threads, like
+    # clock_autojump_threshold above.
+    clock_autojump_wait_for_holds: bool = True
 
     # Guest mode stuff
     is_guest: bool = False
@@ -1852,6 +2009,10 @@ class Runner:  # type: ignore[explicit-any]
           backend. This always has an attribute ``backend`` which is a string
           naming which operating-system-specific I/O backend is in use; the
           other attributes vary between backends.
+        * ``autojump_holds`` (tuple of str): The names of all
+          currently-active autojump holds, i.e. work in flight outside the
+          run loop that keeps an autojump `~trio.testing.MockClock` from
+          jumping. See :func:`trio.lowlevel.autojump_hold`.
 
         """
         seconds_to_next_deadline = self.deadlines.next_deadline() - self.current_time()
@@ -1861,6 +2022,7 @@ class Runner:  # type: ignore[explicit-any]
             seconds_to_next_deadline=seconds_to_next_deadline,
             io_statistics=self.io_manager.statistics(),
             run_sync_soon_queue_size=self.entry_queue.size(),
+            autojump_holds=tuple(sorted(hold.name for hold in self.autojump_holds)),
         )
 
     @_public
@@ -2752,7 +2914,19 @@ def unrolled_run(
             # We use 'elif' here because if there are tasks in
             # wait_all_tasks_blocked, then those tasks will wake up without
             # jumping the clock, so we don't need to autojump.
-            elif runner.clock_autojump_threshold < timeout:
+            #
+            # And if there are active autojump holds (which the clock asked
+            # us to respect), then there's work in flight outside the run
+            # loop -- most commonly a to_thread.run_sync worker thread --
+            # that will reschedule a task all by itself, so the run loop
+            # isn't really idle and we shouldn't jump the clock. We skip
+            # *priming* rather than skipping the jump later, so that instead
+            # of spinning on a zero timeout we sleep in I/O wait until the
+            # external work delivers its result (via run_sync_soon, which
+            # wakes us).
+            elif runner.clock_autojump_threshold < timeout and not (
+                runner.clock_autojump_wait_for_holds and runner.autojump_holds
+            ):
                 timeout = runner.clock_autojump_threshold
                 idle_primed = IdlePrimedTypes.AUTOJUMP_CLOCK
 

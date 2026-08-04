@@ -1,0 +1,5 @@
+The autojump feature of `trio.testing.MockClock` now waits for `trio.to_thread.run_sync` worker threads by default, instead of jumping the clock ahead of them and spuriously firing timeouts while a thread is still doing real work in real time. A thread that's blocked calling back into Trio via `trio.from_thread.run` doesn't block the clock, so virtual time can still advance while the delivered async function runs.
+
+This is implemented on top of a new public API, :func:`trio.lowlevel.autojump_hold`, which any library can use to keep an autojump clock parked while work is in flight outside the run loop (worker processes, foreign event loops, ...). Active holds are reported as ``autojump_holds`` in :func:`trio.lowlevel.current_statistics`.
+
+If a test relies on the old behavior — for example, using a virtual-time timeout to cancel and abandon a stuck ``abandon_on_cancel=True`` thread that would otherwise never finish — it will now hang. Set the new ``autojump_wait_for_threads`` attribute of `~trio.testing.MockClock` to False to restore the previous behavior, or advance the clock explicitly with :meth:`~trio.testing.MockClock.jump`.

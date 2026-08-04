@@ -13,6 +13,7 @@ import typing as _t
 # Generally available symbols
 from ._core import (
     Abort as Abort,
+    AutojumpHold as AutojumpHold,
     ParkingLot as ParkingLot,
     ParkingLotStatistics as ParkingLotStatistics,
     RaiseCancelT as RaiseCancelT,
@@ -25,6 +26,7 @@ from ._core import (
     UnboundedQueueStatistics as UnboundedQueueStatistics,
     add_instrument as add_instrument,
     add_parking_lot_breaker as add_parking_lot_breaker,
+    autojump_hold as autojump_hold,
     cancel_shielded_checkpoint as cancel_shielded_checkpoint,
     checkpoint as checkpoint,
     checkpoint_if_cancelled as checkpoint_if_cancelled,
