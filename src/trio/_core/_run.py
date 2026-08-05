@@ -1770,7 +1770,7 @@ class AutojumpHold(metaclass=NoPublicConstructor):
 
     def _release(self) -> None:
         self._released = True
-        self._runner.autojump_holds.discard(self)
+        self._runner.active_autojump_holds.discard(self)
 
     @enable_ki_protection
     def release(self) -> None:
@@ -1804,7 +1804,7 @@ class AutojumpHold(metaclass=NoPublicConstructor):
 
 
 @enable_ki_protection
-def autojump_hold(name: str = "<unnamed>") -> AutojumpHold:
+def autojump_hold(name: str) -> AutojumpHold:
     """Prevent an autojump `~trio.testing.MockClock` from jumping the clock
     while work is in flight outside the run loop.
 
@@ -1841,7 +1841,9 @@ def autojump_hold(name: str = "<unnamed>") -> AutojumpHold:
 
     Args:
       name (str): an arbitrary label for this hold, shown in
-          :func:`trio.lowlevel.current_statistics` to aid debugging.
+          :func:`trio.lowlevel.current_statistics` to aid debugging. Pick
+          something that identifies who acquired the hold and why, so that a
+          leaked hold can be traced back to its owner.
 
     Returns:
       AutojumpHold: a handle that can be used to release the hold.
@@ -1855,7 +1857,7 @@ def autojump_hold(name: str = "<unnamed>") -> AutojumpHold:
     except AttributeError:
         raise RuntimeError("must be called from async context") from None
     hold = AutojumpHold._create(runner, name)
-    runner.autojump_holds.add(hold)
+    runner.active_autojump_holds.add(hold)
     return hold
 
 
@@ -1962,8 +1964,9 @@ class Runner:  # type: ignore[explicit-any]
     # While this is nonempty (and clock_autojump_wait_for_holds is true),
     # work is in flight outside the run loop, so we don't treat an idle run
     # loop as quiescent for autojump purposes. See
-    # trio.lowlevel.autojump_hold.
-    autojump_holds: set[AutojumpHold] = attrs.Factory(set)
+    # trio.lowlevel.autojump_hold. (Reported publicly as the tuple-of-names
+    # RunStatistics.autojump_holds.)
+    active_autojump_holds: set[AutojumpHold] = attrs.Factory(set)
     # Synced from MockClock.autojump_wait_for_threads, like
     # clock_autojump_threshold above.
     clock_autojump_wait_for_holds: bool = True
@@ -2022,7 +2025,9 @@ class Runner:  # type: ignore[explicit-any]
             seconds_to_next_deadline=seconds_to_next_deadline,
             io_statistics=self.io_manager.statistics(),
             run_sync_soon_queue_size=self.entry_queue.size(),
-            autojump_holds=tuple(sorted(hold.name for hold in self.autojump_holds)),
+            autojump_holds=tuple(
+                sorted(hold.name for hold in self.active_autojump_holds),
+            ),
         )
 
     @_public
@@ -2925,7 +2930,7 @@ def unrolled_run(
             # external work delivers its result (via run_sync_soon, which
             # wakes us).
             elif runner.clock_autojump_threshold < timeout and not (
-                runner.clock_autojump_wait_for_holds and runner.autojump_holds
+                runner.clock_autojump_wait_for_holds and runner.active_autojump_holds
             ):
                 timeout = runner.clock_autojump_threshold
                 idle_primed = IdlePrimedTypes.AUTOJUMP_CLOCK

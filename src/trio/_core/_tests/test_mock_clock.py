@@ -233,14 +233,10 @@ async def test_autojump_hold_api() -> None:
     a.release()
     b.release()
 
-    # the default name
-    with _core.autojump_hold():
-        assert _core.current_statistics().autojump_holds == ("<unnamed>",)
-
 
 def test_autojump_hold_outside_run() -> None:
     with pytest.raises(RuntimeError, match="must be called from async context"):
-        _core.autojump_hold()
+        _core.autojump_hold(name="not in a run")
 
 
 def test_autojump_hold_no_public_constructor() -> None:
